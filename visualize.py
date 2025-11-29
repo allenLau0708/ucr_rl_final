@@ -21,6 +21,7 @@ except ImportError:
 
 from environment import FuelCollectionEnv, CellType
 from agent import ActorCriticNetwork
+from agent_multi_critic import MultiCriticNetwork
 from config import PPOConfig
 
 
@@ -166,8 +167,21 @@ class Visualizer:
         data = torch.load(path, map_location='cpu', weights_only=False)
         config = data.get('config', PPOConfig())
         
-        self.network = ActorCriticNetwork(30, 4, config.hidden_sizes)
-        self.network.load_state_dict(data['network'])
+        # Check if this is a multi-critic model by examining state_dict keys
+        state_dict = data['network']
+        is_multi_critic = any('critics.' in key for key in state_dict.keys())
+        
+        if is_multi_critic:
+            # Multi-critic model
+            reward_terms = data.get('reward_terms', ['goal', 'fuel', 'survival'])
+            self.network = MultiCriticNetwork(30, 4, config.hidden_sizes, reward_terms)
+            print(f"  Detected Multi-Critic model with {len(reward_terms)} critics: {', '.join(reward_terms)}")
+        else:
+            # Standard single-critic model
+            self.network = ActorCriticNetwork(30, 4, config.hidden_sizes)
+            print(f"  Detected standard Actor-Critic model")
+        
+        self.network.load_state_dict(state_dict)
         self.network.eval()
     
     def _is_visible(self, i: int, j: int) -> bool:
@@ -512,7 +526,12 @@ class Visualizer:
                         pending_action = None
                 elif self.network:
                     with torch.no_grad():
-                        logits, _ = self.network.forward(torch.FloatTensor(obs).unsqueeze(0))
+                        obs_tensor = torch.FloatTensor(obs).unsqueeze(0)
+                        # Handle both standard and multi-critic networks
+                        if isinstance(self.network, MultiCriticNetwork):
+                            logits, _ = self.network.forward(obs_tensor)
+                        else:
+                            logits, _ = self.network.forward(obs_tensor)
                         action = torch.argmax(torch.softmax(logits, dim=-1)).item()
                     obs, _, term, trunc, info = self.env.step(action)
                     done = term or trunc
