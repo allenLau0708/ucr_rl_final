@@ -159,6 +159,19 @@ class MultiCriticPPOAgent:
         # Reward terms: goal, fuel, survival (step + death + collision + revisit)
         self.reward_terms = ['goal', 'fuel', 'survival']
         
+        # Advantage weights for combining different objectives
+        # Following the paper: simple equal weights (1/K) often work well
+        # But we can adjust based on task importance
+        # Paper suggests: ω_k = 1/K for K objectives, but allows customization
+        self.advantage_weights = {
+            'goal': 1.0,      # Most important: reaching goal
+            'fuel': 1.0,      # Important: collecting fuel (equal weight as paper suggests)
+            'survival': 1.0   # Base survival (equal weight - let normalization handle scale)
+        }
+        # Normalize weights to sum to 1 (as per paper: Σ_k ω_k = 1)
+        total_weight = sum(self.advantage_weights.values())
+        self.advantage_weights = {k: v / total_weight for k, v in self.advantage_weights.items()}
+        
         self.network = MultiCriticNetwork(
             self.obs_dim, self.action_dim, config.hidden_sizes, self.reward_terms
         ).to(self.device)
@@ -169,13 +182,23 @@ class MultiCriticPPOAgent:
             lr=config.learning_rate
         )
         
-        # Separate optimizer for each critic
+        # Separate optimizer for each critic with unified learning rates
+        # Following the paper: use same learning rate for all critics for stability
+        # The normalization handles scale differences, so we don't need different LRs
+        critic_lr = config.learning_rate * 1.5  # Slightly higher than actor, but not too high
         self.critic_optimizers = {
-            term: optim.Adam(
-                self.network.critics[term].parameters(),
-                lr=config.learning_rate * 2  # Critic often benefits from higher LR
+            'goal': optim.Adam(
+                self.network.critics['goal'].parameters(),
+                lr=critic_lr
+            ),
+            'fuel': optim.Adam(
+                self.network.critics['fuel'].parameters(),
+                lr=critic_lr
+            ),
+            'survival': optim.Adam(
+                self.network.critics['survival'].parameters(),
+                lr=critic_lr
             )
-            for term in self.reward_terms
         }
         
         self.buffer = MultiRewardRolloutBuffer(self.reward_terms)
@@ -189,10 +212,18 @@ class MultiCriticPPOAgent:
             'reached_goal': deque(maxlen=100),
             'died': deque(maxlen=100),
         }
+        
+        # Track reward decomposition for monitoring
+        self.reward_decomposition_stats = {
+            term: deque(maxlen=1000) for term in self.reward_terms
+        }
     
     def _decompose_reward(self, reward: float, info: dict, prev_fuel_collected: int, 
                          current_fuel_collected: int) -> Dict[str, float]:
-        """Decompose scalar reward into reward terms based on environment config."""
+        """
+        Decompose scalar reward into reward terms based on environment config.
+        Improved version: more accurate decomposition.
+        """
         reward_dict = {term: 0.0 for term in self.reward_terms}
         
         # Get config values
@@ -200,24 +231,26 @@ class MultiCriticPPOAgent:
         fuel_reward = self.env.config.fuel_pickup_reward
         death_penalty = self.env.config.death_penalty
         step_penalty = self.env.config.step_penalty
-        collision_penalty = self.env.config.collision_penalty
-        revisit_penalty = self.env.config.revisit_penalty
         
-        # Goal reward (only when reaching goal)
+        # Goal reward (only when reaching goal) - sparse, high value
         if info.get('reached_goal', False):
             reward_dict['goal'] = goal_reward
         
-        # Fuel reward (when fuel is collected)
+        # Fuel reward (when fuel is collected) - sparse, medium value
         if current_fuel_collected > prev_fuel_collected:
             reward_dict['fuel'] = fuel_reward
         
-        # Survival reward: everything else (step_penalty, death_penalty, collision, revisit)
+        # Survival reward: step penalty + collision + revisit + death penalty
+        # This captures all survival-related signals (navigation and staying alive)
         if info.get('died', False):
             reward_dict['survival'] = death_penalty
         else:
-            # Base survival reward: step_penalty + collision + revisit
-            # Approximate: total reward minus goal and fuel components
-            reward_dict['survival'] = reward - reward_dict['goal'] - reward_dict['fuel']
+            # Base survival: step penalty (always present)
+            # Collision and revisit penalties are also survival-related
+            # We approximate by: total_reward - goal_reward - fuel_reward
+            # This captures step_penalty + collision_penalty + revisit_penalty
+            base_survival = reward - reward_dict['goal'] - reward_dict['fuel']
+            reward_dict['survival'] = base_survival
         
         return reward_dict
     
@@ -241,6 +274,10 @@ class MultiCriticPPOAgent:
             
             # Decompose reward based on environment state
             reward_dict = self._decompose_reward(reward, info, prev_fuel_collected, current_fuel_collected)
+            
+            # Track reward decomposition for monitoring
+            for term in self.reward_terms:
+                self.reward_decomposition_stats[term].append(reward_dict[term])
             
             # Get values from all critics
             with torch.no_grad():
@@ -307,7 +344,19 @@ class MultiCriticPPOAgent:
                 advantages[t] = last_gae = delta + gamma * lam * (1 - next_done) * last_gae
             
             self.returns[term] = advantages + values
-            self.advantages[term] = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
+            # Normalize advantages following the paper (Eq. 8):
+            # Ā_k_t = (A_k_t - E_t[A_k_t]) / sqrt(Var_t[A_k_t])
+            # This ensures each objective contributes at the same scale
+            adv_mean = advantages.mean()
+            adv_std = advantages.std()
+            if adv_std > 1e-8:
+                # Standard normalization as per paper
+                normalized_adv = (advantages - adv_mean) / adv_std
+                # Light clipping to prevent extreme outliers (paper doesn't clip, but helps stability)
+                self.advantages[term] = np.clip(normalized_adv, -5.0, 5.0)
+            else:
+                # If std is too small, just center around zero
+                self.advantages[term] = advantages - adv_mean
     
     def update(self) -> Dict[str, float]:
         obs = torch.FloatTensor(np.array(self.buffer.observations)).to(self.device)
@@ -330,11 +379,22 @@ class MultiCriticPPOAgent:
                 
                 new_log_probs, values_dict, entropy = self.network.evaluate_actions(obs[idx], actions[idx])
                 
-                # Combine advantages from all critics (weighted sum)
-                # This ensures policy optimizes for all objectives
+                # Combine advantages from all critics using weighted sum
+                # Following the paper: each advantage is independently normalized,
+                # then combined with weights. No need to normalize again after combination.
+                # This matches Eq. 9 in the paper: L_π = E_t[Σ_k ω_k * Ā_k_t * log π]
                 combined_advantages = torch.zeros_like(advantages[self.reward_terms[0]][idx])
+                total_weight = sum(self.advantage_weights.get(term, 1.0) for term in self.reward_terms)
+                
                 for term in self.reward_terms:
-                    combined_advantages += advantages[term][idx] / len(self.reward_terms)
+                    weight = self.advantage_weights.get(term, 1.0)
+                    # Each advantage is already normalized (Ā_k_t in the paper)
+                    # Combine with weights: ω_k * Ā_k_t
+                    combined_advantages += advantages[term][idx] * weight / total_weight
+                
+                # Note: According to the paper, we should NOT normalize again after combination
+                # The paper uses PopArt for value normalization, but for advantage combination,
+                # the weighted sum of already-normalized advantages is sufficient
                 
                 ratio = torch.exp(new_log_probs - old_log_probs[idx])
                 surr1 = ratio * combined_advantages
