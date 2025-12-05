@@ -67,94 +67,58 @@ def train(timesteps: int = 50000000, seed: int = 42, save_dir: str = "models"):
     print_interval = 10   # Print every 10 updates (~20k steps)
     eval_interval = 10    # Eval every 10 updates
     
-    # Log advantage weights for monitoring
-    print(f"Advantage weights: {agent.advantage_weights}")
-    critic_lr = config.learning_rate * 1.5
-    print(f"Critic learning rates: goal={critic_lr:.2e}, "
-          f"fuel={critic_lr:.2e}, "
-          f"survival={critic_lr:.2e}")
-    print()
-    
-    try:
-        for update in range(n_updates):
-            stats = agent.collect_rollouts(config.n_steps)
-            agent.update()
+    for update in range(n_updates):
+        stats = agent.collect_rollouts(config.n_steps)
+        agent.update()
+        
+        history['timesteps'].append(agent.total_steps)
+        history['episode_rewards'].append(stats['mean_reward'])
+        history['episode_lengths'].append(stats['mean_length'])
+        history['fuel_collected'].append(stats['mean_fuel'])
+        history['goal_rate'].append(stats['goal_rate'])
+        history['death_rate'].append(stats['death_rate'])
+        
+        # Log to TensorBoard
+        writer.add_scalar('Train/Reward', stats['mean_reward'], agent.total_steps)
+        writer.add_scalar('Train/Goal_Rate', stats['goal_rate'], agent.total_steps)
+        writer.add_scalar('Train/Death_Rate', stats['death_rate'], agent.total_steps)
+        writer.add_scalar('Train/Fuel_Collected', stats['mean_fuel'], agent.total_steps)
+        writer.add_scalar('Train/Episode_Length', stats['mean_length'], agent.total_steps)
+        
+        # Log individual critic advantages (if available)
+        # This helps monitor if one critic dominates
+        for term in agent.reward_terms:
+            if hasattr(agent, 'advantages') and term in agent.advantages:
+                mean_adv = np.mean(agent.advantages[term])
+                writer.add_scalar(f'Critic/{term}_advantage', mean_adv, agent.total_steps)
+        
+        # Print training stats
+        if (update + 1) % print_interval == 0 or update == 0:
+            progress = (update + 1) / n_updates * 100
+            print(f"[{progress:5.1f}%] Step {agent.total_steps:7d} | "
+                  f"Reward: {stats['mean_reward']:6.1f} | "
+                  f"Goal: {stats['goal_rate']:5.1%} (train) | "
+                  f"Fuel: {stats['mean_fuel']:.1f}")
+        
+        # Periodic evaluation with deterministic policy
+        if (update + 1) % eval_interval == 0:
+            eval_stats = agent.evaluate(n_episodes=50)
+            history['eval_goal_rate'].append(eval_stats['goal_rate'])
+            history['eval_death_rate'].append(eval_stats['death_rate'])
             
-            history['timesteps'].append(agent.total_steps)
-            history['episode_rewards'].append(stats['mean_reward'])
-            history['episode_lengths'].append(stats['mean_length'])
-            history['fuel_collected'].append(stats['mean_fuel'])
-            history['goal_rate'].append(stats['goal_rate'])
-            history['death_rate'].append(stats['death_rate'])
+            print(f"         EVAL: Goal={eval_stats['goal_rate']:.1%}, "
+                  f"Death={eval_stats['death_rate']:.1%}, "
+                  f"Fuel={eval_stats['mean_fuel']:.1f}")
             
-            # Log to TensorBoard
-            writer.add_scalar('Train/Reward', stats['mean_reward'], agent.total_steps)
-            writer.add_scalar('Train/Goal_Rate', stats['goal_rate'], agent.total_steps)
-            writer.add_scalar('Train/Death_Rate', stats['death_rate'], agent.total_steps)
-            writer.add_scalar('Train/Fuel_Collected', stats['mean_fuel'], agent.total_steps)
-            writer.add_scalar('Train/Episode_Length', stats['mean_length'], agent.total_steps)
+            # Log eval to TensorBoard
+            writer.add_scalar('Eval/Goal_Rate', eval_stats['goal_rate'], agent.total_steps)
+            writer.add_scalar('Eval/Death_Rate', eval_stats['death_rate'], agent.total_steps)
+            writer.add_scalar('Eval/Fuel_Collected', eval_stats['mean_fuel'], agent.total_steps)
             
-            # Log individual critic advantages (if available)
-            # This helps monitor if one critic dominates
-            for term in agent.reward_terms:
-                if hasattr(agent, 'advantages') and term in agent.advantages:
-                    mean_adv = np.mean(agent.advantages[term])
-                    std_adv = np.std(agent.advantages[term])
-                    writer.add_scalar(f'Critic/{term}_advantage_mean', mean_adv, agent.total_steps)
-                    writer.add_scalar(f'Critic/{term}_advantage_std', std_adv, agent.total_steps)
-            
-            # Log reward decomposition statistics
-            for term in agent.reward_terms:
-                if term in agent.reward_decomposition_stats and agent.reward_decomposition_stats[term]:
-                    mean_reward = np.mean(agent.reward_decomposition_stats[term])
-                    writer.add_scalar(f'Reward/{term}_mean', mean_reward, agent.total_steps)
-            
-            # Print training stats
-            if (update + 1) % print_interval == 0 or update == 0:
-                progress = (update + 1) / n_updates * 100
-                print(f"[{progress:5.1f}%] Step {agent.total_steps:7d} | "
-                      f"Reward: {stats['mean_reward']:6.1f} | "
-                      f"Goal: {stats['goal_rate']:5.1%} (train) | "
-                      f"Fuel: {stats['mean_fuel']:.1f}")
-            
-            # Periodic evaluation with deterministic policy
-            if (update + 1) % eval_interval == 0:
-                eval_stats = agent.evaluate(n_episodes=50)
-                history['eval_goal_rate'].append(eval_stats['goal_rate'])
-                history['eval_death_rate'].append(eval_stats['death_rate'])
-                
-                print(f"         EVAL: Goal={eval_stats['goal_rate']:.1%}, "
-                      f"Death={eval_stats['death_rate']:.1%}, "
-                      f"Fuel={eval_stats['mean_fuel']:.1f}")
-                
-                # Log eval to TensorBoard
-                writer.add_scalar('Eval/Goal_Rate', eval_stats['goal_rate'], agent.total_steps)
-                writer.add_scalar('Eval/Death_Rate', eval_stats['death_rate'], agent.total_steps)
-                writer.add_scalar('Eval/Fuel_Collected', eval_stats['mean_fuel'], agent.total_steps)
-                
-                # Save best model based on EVALUATION (not training)
-                if eval_stats['goal_rate'] > best_eval_goal_rate:
-                    best_eval_goal_rate = eval_stats['goal_rate']
-                    agent.save(os.path.join(save_dir, "best_model_multi_critic.pt"))
-    
-    except KeyboardInterrupt:
-        print("\n" + "="*60)
-        print("Training interrupted by user")
-        print(f"Completed {update + 1}/{n_updates} updates ({agent.total_steps:,} steps)")
-        print("="*60)
-    except Exception as e:
-        print("\n" + "="*60)
-        print(f"Training error at update {update + 1}/{n_updates}")
-        print(f"Steps completed: {agent.total_steps:,}")
-        print(f"Error: {e}")
-        print("="*60)
-        import traceback
-        traceback.print_exc()
-        # Save current model before exiting
-        emergency_path = os.path.join(save_dir, f"emergency_save_{timestamp}.pt")
-        agent.save(emergency_path)
-        print(f"Emergency save: {emergency_path}")
-        raise
+            # Save best model based on EVALUATION (not training)
+            if eval_stats['goal_rate'] > best_eval_goal_rate:
+                best_eval_goal_rate = eval_stats['goal_rate']
+                agent.save(os.path.join(save_dir, "best_model_multi_critic.pt"))
     
     # Rename best_model.pt to agent_时间.pt
     temp_best_path = os.path.join(save_dir, "best_model_multi_critic.pt")
