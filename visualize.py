@@ -214,9 +214,26 @@ class Visualizer:
         agent_i, agent_j = self.env.agent_pos
         
         # Track collected fuel positions
-        current_fuel_set = set(tuple(f) for f in self.env.fuel_items)
+        # Only mark as collected if it was in initial positions but not in current fuel_items
+        # AND the grid cell is no longer FUEL (has been collected)
         if hasattr(self, 'initial_fuel_positions'):
-            self.collected_fuel_positions = self.initial_fuel_positions - current_fuel_set
+            # Ensure both sets use the same format (tuple)
+            current_fuel_set = set(tuple(f) for f in self.env.fuel_items)
+            # Calculate positions that were initially fuel but are no longer in fuel_items
+            potential_collected = self.initial_fuel_positions - current_fuel_set
+            
+            # Only mark as collected if:
+            # 1. It was in initial_fuel_positions
+            # 2. It's not in current fuel_items  
+            # 3. The grid cell is EMPTY (fuel was actually collected and removed from grid)
+            self.collected_fuel_positions = {
+                pos for pos in potential_collected
+                if (0 <= pos[0] < self.grid_size and 
+                    0 <= pos[1] < self.grid_size and
+                    self.env.grid[pos[0], pos[1]] == CellType.EMPTY)
+            }
+        else:
+            self.collected_fuel_positions = set()
         
         for i in range(self.grid_size):
             for j in range(self.grid_size):
@@ -228,7 +245,15 @@ class Visualizer:
                 is_visible = self._is_visible(i, j)
                 
                 # Check if this is a collected fuel position
-                is_collected_fuel = hasattr(self, 'collected_fuel_positions') and pos in self.collected_fuel_positions
+                # Only show as collected if:
+                # 1. It was in initial fuel positions
+                # 2. It's not in current fuel_items
+                # 3. The grid cell is EMPTY (fuel has been removed)
+                is_collected_fuel = (
+                    hasattr(self, 'collected_fuel_positions') and 
+                    pos in self.collected_fuel_positions and
+                    cell == CellType.EMPTY  # Only show as collected if cell is actually empty
+                )
                 
                 # Determine cell color
                 if cell == CellType.OBSTACLE:
@@ -437,7 +462,9 @@ class Visualizer:
                     elif cell == CellType.FUEL:
                         color = COLORS['empty'] if self.use_image_icons else COLORS['fuel']
                         icon_key = 'fuel'
-                    elif hasattr(self, 'collected_fuel_positions') and pos in self.collected_fuel_positions:
+                    elif (hasattr(self, 'collected_fuel_positions') and 
+                          pos in self.collected_fuel_positions and
+                          cell == CellType.EMPTY):
                         color = COLORS['empty']
                         icon_key = 'fuel_collected'
                     else:
@@ -478,7 +505,13 @@ class Visualizer:
         obs, info = self.env.reset(seed=seed)
         self.reset_count = 1
         self.trajectory = [list(self.env.agent_pos)]
-        self.initial_fuel_positions = set(tuple(f) for f in self.env.fuel_items)
+        # Only include positions that are actually FUEL in the grid
+        self.initial_fuel_positions = {
+            tuple(f) for f in self.env.fuel_items
+            if (0 <= f[0] < self.grid_size and 
+                0 <= f[1] < self.grid_size and
+                self.env.grid[f[0], f[1]] == CellType.FUEL)
+        }
         self.collected_fuel_positions = set()
         
         done = False
@@ -512,6 +545,14 @@ class Visualizer:
                         obs, info = self.env.reset(seed=seed)
                         self.reset_count += 1
                         self.trajectory = [list(self.env.agent_pos)]
+                        # Only include positions that are actually FUEL in the grid
+                        self.initial_fuel_positions = {
+                            tuple(f) for f in self.env.fuel_items
+                            if (0 <= f[0] < self.grid_size and 
+                                0 <= f[1] < self.grid_size and
+                                self.env.grid[f[0], f[1]] == CellType.FUEL)
+                        }
+                        self.collected_fuel_positions = set()
                         done = False
                     elif event.key in self.action_keys:
                         pending_action = self.action_keys[event.key]
