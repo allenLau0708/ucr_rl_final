@@ -460,7 +460,8 @@ class Visualizer:
         controls = [
             "V: Toggle View",
             "R: New Map",
-            "↑↓←→: Move",
+            # "↑↓←→: Move",
+            "U D L R: Move",
             "SPACE: Pause",
             "Q: Quit"
         ]
@@ -487,7 +488,8 @@ class Visualizer:
         print("\nControls:")
         print("  V: Toggle Global/Agent View")
         print("  R: New Random Map")
-        print("  ↑↓←→: Move")
+        # print("  ↑↓←→: Move")
+        print("  U D L R: Move")
         print("  SPACE: Pause")
         print("  Q: Quit")
         
