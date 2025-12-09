@@ -19,4 +19,17 @@ dist/
 # Experiment outputs
 runs/
 
+# Model files (keep only best_models/)
+models/
+!best_models/
+!best_models/*.pt
+
+# Experimental results
+eval_results*
+
+# Environment pool
+env_pool.npz
+
+# Final Report
+Final_Report.*
 

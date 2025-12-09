@@ -1,6 +1,8 @@
 # Fuel Collection RL
 
-PPO agents learn to survive in a dual-objective gridworld: reaching a goal while collecting scarce fuel. This repository contains the environment, PPO implementation, training utilities, and a polished Pygame visualizer that supports custom PNG icons.
+PPO agents learn to survive in a dual-objective gridworld: reaching a goal while collecting scarce fuel. This repository contains the environment, single-critic and multi-critic PPO implementations, training utilities, evaluation scripts, and a polished Pygame visualizer.
+
+**CS258 Final Project: Learning to Survive in a Dual-Objective Environment**
 
 ---
 
@@ -8,26 +10,31 @@ PPO agents learn to survive in a dual-objective gridworld: reaching a goal while
 
 ```
 final/
-├── agent.py            # PPO actor-critic network and update logic
-├── config.py           # Dataclasses describing all tunable hyperparameters
-├── environment.py      # FuelCollectionEnv gymnasium environment
-├── train.py            # Training/experiment runner
-├── visualize.py        # Manual play + model playback (Pygame)
-├── models/             # Saved checkpoints (.pt)
-├── assets/icons/       # Optional icon PNGs used by the visualizer
-├── requirements.txt    # Python dependencies
+├── agent.py                  # Single-critic PPO agent
+├── agent_multi_critic.py     # Multi-critic PPO agent (separate critic per reward term)
+├── config.py                 # PPO and environment configuration
+├── environment.py            # FuelCollectionEnv gymnasium environment
+├── train_vanilla_ppo.py                  # Training script for single-critic PPO
+├── train_multi_critic.py     # Training script for multi-critic PPO
+├── evaluate_models.py        # Evaluation and comparison script
+├── visualize.py              # Interactive visualizer (Pygame)
+├── best_models/              # Best trained models
+│   ├── best_model_vanilla_ppo.pt
+│   └── best_model_multi_critic.pt
+├── models/                   # Training checkpoints (not tracked by git)
+├── assets/icons/             # Custom PNG icons for visualizer
+├── env_pool.npz              # Pre-generated environment pool for evaluation (not tracked by git)
+├── requirements.txt          # Python dependencies
 └── README.md
 ```
-
-`main.py` has been removed—use `train.py` or `visualize.py` directly for all workflows.
 
 ---
 
 ## Setup
 
 ```bash
-git clone https://github.com/allenLau0708/ucr_rl_final.git
-cd ucr_rl_final
+git clone <repository-url>
+cd final
 
 # Option A – Python's built-in venv
 python -m venv .venv
@@ -44,75 +51,201 @@ pip install -r requirements.txt
 
 ## Usage
 
-### Launch the interactive visualizer
+### Interactive Visualizer
+
+Launch the Pygame visualizer to watch trained agents or play manually:
+
 ```bash
-python visualize.py                # Manual play
-python visualize.py --model models/best_model_ppo_1126.pt   # Watch a trained agent
+# Manual play
+python visualize.py
+
+# Watch a trained agent
+python visualize.py --model best_models/best_model_vanilla_ppo.pt
+python visualize.py --model best_models/best_model_multi_critic.pt
 ```
 
-Features:
-- Toggle between global/agent view (`V`)
-- Live stats (fuel, reward, trajectory)
-- Custom PNG icons loaded from `assets/icons/` (`agent.png`, `goal.png`, `fuel.png`, `fuel_collected.png`, `obstacle.png`, `unknown.png`)
+**Visualizer Features:**
+- Toggle between global view and agent view (5×5 local view) with `V` key
+- Live stats display (fuel, reward, trajectory)
+- Custom PNG icons loaded from `assets/icons/` (falls back to emoji/ASCII if missing)
+- Manual control with arrow keys when no model is loaded
 
-### Train PPO agents
+### Training Agents
+
+#### Single-Critic PPO
+
 ```bash
-python train.py
+python train_vanilla_ppo.py
 ```
 
-Defaults (override via CLI flags):
-- `total_timesteps=50_000`
-- `scheme="linear"`
-- `navigation_weight=0.6`, `collection_weight=0.4`
-- `schedule_type="linear"` (when `scheme="scheduling"`)
-- checkpoints saved to `models/` every evaluation interval
+**Default settings:**
+- `timesteps=50_000_000` (50M steps)
+- `seed=42`
+- Saves checkpoints to `models/`
+- Best model saved based on evaluation goal rate
 
-Other useful flags (`train.py -h`):
-- `--scheme {linear,scheduling}`
-- `--nav-weight`, `--col-weight`
-- `--schedule-type {linear,cosine,exp,step}`
-- `--eval-freq`, `--save-path`
+**Arguments:**
+```bash
+python train_vanilla_ppo.py --timesteps 10000000 --seed 123 --save-dir models
+```
 
-Checkpoints are saved under `models/` and TensorBoard logs under `runs/`.
+#### Multi-Critic PPO
+
+```bash
+python train_multi_critic.py
+```
+
+The multi-critic approach uses separate value networks for each reward term (goal, fuel, survival), which helps balance the dual objectives more effectively.
+
+**Arguments:**
+```bash
+python train_multi_critic.py --timesteps 10000000 --seed 123 --save-dir models
+```
+
+**Training Output:**
+- Model checkpoints saved to `models/` with timestamps
+- Training history saved as JSON files
+- TensorBoard logs in `runs/` directory
+- Best model automatically saved based on evaluation performance
+
+**Monitor Training:**
+```bash
+tensorboard --logdir=runs
+# Then open http://localhost:6006
+```
+
+### Evaluating Models
+
+Compare two trained models across a pool of environments:
+
+```bash
+python evaluate_models.py \
+    --modelA best_models/best_model_vanilla_ppo.pt \
+    --modelB best_models/best_model_multi_critic.pt \
+    --env-pool env_pool.npz \
+    --n-maps 100 \
+    --out eval_results.json
+```
+
+This generates:
+- Per-map statistics (goal rate, death rate, fuel collected, etc.)
+- Aggregated comparison metrics
+- CSV and JSON output files
 
 ---
 
 ## Environment Summary
 
-- **Grid:** 10×10 cells, random goal, obstacles, and fuel each episode
-- **Observation:** 30-D vector (agent position, distances, remaining fuel ratio, 5×5 egocentric map)
-- **Actions:** `0` up, `1` down, `2` left, `3` right
-- **Rewards:** +10 goal, +2 per fuel, -0.1 per step, -1 obstacle collision, terminal penalty on fuel depletion
+**Grid:** 12×12 cells with randomly placed goal, obstacles, and fuel items each episode
+
+**Observation Space (30-D):**
+- Agent position (2): normalized x, y coordinates
+- Goal direction (2): normalized direction vector to goal
+- Current fuel (1): normalized remaining fuel ratio
+- 5×5 egocentric map (25): local view around agent (empty/goal/obstacle/fuel)
+
+**Action Space:** 4 discrete actions
+- `0`: Move up
+- `1`: Move down
+- `2`: Move left
+- `3`: Move right
+
+**Rewards:**
+- `+100.0`: Reaching goal
+- `+5.0`: Collecting fuel item
+- `-0.1`: Per step penalty
+- `-1.0`: Collision with obstacle/wall
+- `-0.5`: Revisiting a cell
+- `-50.0`: Death penalty (fuel depletion)
+
+**Challenge:**
+- Initial fuel: 14 units
+- Fuel per item: 10 units
+- Goal typically requires 20+ steps
+- Agent must collect fuel items to survive and reach the goal
 
 The environment exposes standard Gymnasium API (`reset`, `step`, `render`), enabling easy integration with other RL algorithms.
 
 ---
 
+## Architecture
+
+### Single-Critic PPO (`agent.py`)
+- Shared actor-critic network
+- Single value function estimates total return
+- Standard PPO with clipped surrogate objective
+
+### Multi-Critic PPO (`agent_multi_critic.py`)
+- Shared actor network
+- Separate critic networks for each reward term:
+  - Goal critic: estimates value for goal-reaching
+  - Fuel critic: estimates value for fuel collection
+  - Survival critic: estimates value for staying alive
+- Combined advantage calculation from all critics
+- Helps prevent exploitation of easy reward terms
+
+---
+
 ## Custom Icons
 
-1. Export transparent PNGs (≈512×512) for each role: `agent`, `goal`, `fuel`, `fuel_collected`, `obstacle`, `unknown`.
-2. Place them in `assets/icons/`.
+The visualizer supports custom PNG icons:
+
+1. Export transparent PNGs (≈512×512) for each role:
+   - `agent.png`
+   - `goal.png`
+   - `fuel.png`
+   - `fuel_collected.png`
+   - `obstacle.png`
+   - `unknown.png` (for fog of war)
+
+2. Place them in `assets/icons/`
+
 3. The visualizer automatically scales and uses them for both the main grid and the mini-map. Missing files fall back to emoji/ASCII characters.
+
+---
+
+## Project Structure
+
+- **Training:** `train_vanilla_ppo.py` and `train_multi_critic.py` handle training loops, evaluation, and checkpointing
+- **Agents:** `agent.py` (single-critic) and `agent_multi_critic.py` (multi-critic) implement PPO
+- **Evaluation:** `evaluate_models.py` compares models across environment pools
+- **Visualization:** `visualize.py` provides interactive Pygame interface
+- **Configuration:** `config.py` contains hyperparameters and environment settings
 
 ---
 
 ## Tips & Experiments
 
-- **Trade-off sweeps:** run `train.py` with `--nav-weight` ∈ {0.2, 0.5, 0.8} to map the Pareto front between goal-reaching and collection.
-- **Scheduling curricula:** `--scheme scheduling --schedule-type step --initial-nav-weight 0.3 --final-nav-weight 0.9`.
-- **Ablations:** tweak `config.py` (grid size, fuel budget, reward magnitudes) to stress-test policies.
-- **Visualization of logs:** launch TensorBoard on `runs/` for reward curves and diagnostics.
+- **Hyperparameter tuning:** Adjust `PPOConfig` in `config.py` or modify training scripts
+- **Environment difficulty:** Modify `EnvConfig` in `environment.py` (grid size, fuel amounts, maze density)
+- **Training duration:** Default is 50M steps; reduce `--timesteps` for faster experiments
+- **Evaluation:** Use `evaluate_models.py` with `env_pool.npz` for fair model comparison
+- **Visualization:** Launch TensorBoard to monitor training curves and metrics
 
 ---
 
 ## Troubleshooting
 
-- **No emoji/PNG icons:** ensure `pygame` finds system fonts or provide PNGs as described above.
-- **Black window on macOS:** run `python -m pygame.examples.aliens` once to grant display permissions, or set `SDL_VIDEODRIVER=x11`.
-- **Slow training:** reduce `total_timesteps`, shrink `hidden_sizes`, or lower `n_steps` in `PPOConfig`.
+- **No emoji/PNG icons:** Ensure `pygame` finds system fonts or provide PNGs in `assets/icons/`
+- **Black window on macOS:** Run `python -m pygame.examples.aliens` once to grant display permissions, or set `SDL_VIDEODRIVER=x11`
+- **Slow training:** Reduce `total_timesteps`, shrink `hidden_sizes`, or lower `n_steps` in `PPOConfig`
+- **Model loading errors:** Ensure model architecture matches (single-critic vs multi-critic)
+- **CUDA errors:** Models default to CPU; modify `device` in `PPOConfig` if using GPU
+
+---
+
+## Results
+
+Best models are saved in `best_models/`:
+- `best_model_vanilla_ppo.pt`: Single-critic PPO agent
+- `best_model_multi_critic.pt`: Multi-critic PPO agent
+
+Training checkpoints and evaluation results are gitignored (see `.gitignore`).
 
 ---
 
 ## License & Attribution
 
-Course project for CS258 (Fall 2025) by Zeli Liu & Hefeifei Jiang. Feel free to fork for educational or research purposes. Please cite the original PPO paper (Schulman et al., 2017) if you use the agent implementation.
+Course project for CS258 (Fall 2025) by Zeli Liu & Hefeifei Jiang. 
+
+Feel free to fork for educational or research purposes. Please cite the original PPO paper (Schulman et al., 2017) if you use the agent implementation.
