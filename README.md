@@ -1,8 +1,6 @@
-# Fuel Collection RL
+# Learning to Survive in a Dual-Objective Environment
 
 PPO agents learn to survive in a dual-objective gridworld: reaching a goal while collecting scarce fuel. This repository contains the environment, single-critic and multi-critic PPO implementations, training utilities, evaluation scripts, and a polished Pygame visualizer.
-
-**CS258 Final Project: Learning to Survive in a Dual-Objective Environment**
 
 ---
 
@@ -246,6 +244,4 @@ Training checkpoints and evaluation results are gitignored (see `.gitignore`).
 
 ## License & Attribution
 
-Course project for CS258 (Fall 2025) by Zeli Liu & Hefeifei Jiang. 
-
-Feel free to fork for educational or research purposes. Please cite the original PPO paper (Schulman et al., 2017) if you use the agent implementation.
+Course project for CS258/EE227 (Fall 2025) by Zeli Liu & Hefeifei Jiang. 
